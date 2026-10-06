@@ -53,32 +53,40 @@ export function useNotes(slideId: string, index: number, initial: string | undef
     }
   }, []);
 
-  const persist = useCallback(async (target: Target, text: string) => {
-    inflightRef.current?.abort();
-    const ctl = new AbortController();
-    inflightRef.current = ctl;
-    setStatus({ kind: 'saving' });
-    try {
-      const res = await fetch('/__notes', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ slideId: target.slideId, index: target.index, text }),
-        signal: ctl.signal,
-      });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) throw new Error(body.error ?? `PUT /__notes → ${res.status}`);
-      sessionCache.set(cacheKey(target.slideId, target.index), text);
-      if (inflightRef.current !== ctl) return;
-      lastSavedRef.current = text;
-      dirtyRef.current = false;
-      setStatus({ kind: 'saved' });
-    } catch (err) {
-      if ((err as { name?: string }).name === 'AbortError') return;
-      setStatus({ kind: 'error', message: String((err as Error).message ?? err) });
-    } finally {
-      if (inflightRef.current === ctl) inflightRef.current = null;
-    }
-  }, []);
+  const persist = useCallback(
+    async (target: Target, text: string) => {
+      inflightRef.current?.abort();
+      const ctl = new AbortController();
+      inflightRef.current = ctl;
+      const isCurrentTarget = () =>
+        targetRef.current.slideId === target.slideId && targetRef.current.index === target.index;
+      setStatus({ kind: 'saving' });
+      try {
+        const res = await fetch('/__notes', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ slideId: target.slideId, index: target.index, text }),
+          signal: ctl.signal,
+        });
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        if (!res.ok) throw new Error(body.error ?? `PUT /__notes → ${res.status}`);
+        if (inflightRef.current !== ctl || ctl.signal.aborted) return;
+        sessionCache.set(cacheKey(target.slideId, target.index), text);
+        if (!isCurrentTarget()) return;
+        lastSavedRef.current = text;
+        dirtyRef.current = valueRef.current !== text;
+        if (!dirtyRef.current) cancelTimer();
+        setStatus({ kind: dirtyRef.current ? 'idle' : 'saved' });
+      } catch (err) {
+        if ((err as { name?: string }).name === 'AbortError') return;
+        if (inflightRef.current !== ctl || ctl.signal.aborted || !isCurrentTarget()) return;
+        setStatus({ kind: 'error', message: String((err as Error).message ?? err) });
+      } finally {
+        if (inflightRef.current === ctl) inflightRef.current = null;
+      }
+    },
+    [cancelTimer],
+  );
 
   const flush = useCallback(async () => {
     cancelTimer();
@@ -92,14 +100,16 @@ export function useNotes(slideId: string, index: number, initial: string | undef
   useEffect(() => {
     const prev = targetRef.current;
     const targetChanged = prev.slideId !== slideId || prev.index !== index;
-    if (targetChanged && dirtyRef.current) {
+    if (!targetChanged) return;
+    if (dirtyRef.current) {
       cancelTimer();
       const pending = valueRef.current;
-      if (lastSavedRef.current !== pending) void persist(prev, pending);
+      void persist(prev, pending);
     }
     targetRef.current = { slideId, index };
     cancelTimer();
     setValueState(initialText);
+    valueRef.current = initialText;
     lastSavedRef.current = initialText;
     dirtyRef.current = false;
     setStatus({ kind: 'idle' });
@@ -115,7 +125,8 @@ export function useNotes(slideId: string, index: number, initial: string | undef
   const setValue = useCallback(
     (next: string) => {
       setValueState(next);
-      dirtyRef.current = next !== lastSavedRef.current;
+      valueRef.current = next;
+      dirtyRef.current = next !== lastSavedRef.current || inflightRef.current !== null;
       cancelTimer();
       if (!dirtyRef.current) {
         setStatus({ kind: 'idle' });
