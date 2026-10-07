@@ -2,4 +2,4 @@
 "@open-slide/core": patch
 ---
 
-Preserve newer speaker-note edits and ignore save responses from previous pages.
+Preserve newer speaker-note edits and complete saves independently for each page.
